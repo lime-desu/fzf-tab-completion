@@ -51,7 +51,8 @@ fzf_completion() {
 
         # all except autoload functions
         local full_variables="$(typeset -p)"
-        local full_functions="$(functions + | "$_fzf_bash_completion_grep"  -F -vx "$(functions -u +)")"
+        local full_functions="$(functions + | "$_fzf_bash_completion_grep" -F -vx "$(functions -u +)")"
+        local autoload_variables="$(typeset + | "$_fzf_bash_completion_grep" -F 'undefined ' | "$_fzf_bash_completion_awk" '{print $NF}')"
 
         # do not allow grouping, it stuffs up display strings
         zstyle ":completion:*:*" list-grouped no
@@ -60,10 +61,16 @@ fzf_completion() {
         local _FZF_COMPLETION_CONTEXT
         _FZF_COMPLETION_CONTEXT="${compstate[context]//_/-}"
         _FZF_COMPLETION_CONTEXT="${_FZF_COMPLETION_CONTEXT:+-$_FZF_COMPLETION_CONTEXT-}"
-        if [ "$_FZF_COMPLETION_CONTEXT" = -command- -a "$CURRENT" -gt 1 ]; then
-            _FZF_COMPLETION_CONTEXT="${words[1]}"
+
+        if [[ "$_FZF_COMPLETION_CONTEXT" = -value- ]]; then
+            _FZF_COMPLETION_CONTEXT="${_FZF_COMPLETION_CONTEXT:-*}:${compstate[parameter]}:"
+        else
+            if [[ "$_FZF_COMPLETION_CONTEXT" == -command- && "$CURRENT" > 1 ]]; then
+                _FZF_COMPLETION_CONTEXT="${words[1]}"
+            fi
+            _FZF_COMPLETION_CONTEXT="${_FZF_COMPLETION_CONTEXT:-*}::${(j-,-)words[@]}"
         fi
-        _FZF_COMPLETION_CONTEXT=":completion:${curcontext}:complete:${_FZF_COMPLETION_CONTEXT:-*}::${(j-,-)words[@]}"
+        _FZF_COMPLETION_CONTEXT=":completion:${curcontext}:complete:$_FZF_COMPLETION_CONTEXT"
 
         local _FZF_COMPLETION_SEARCH_DISPLAY=0
         if zstyle -t "$_FZF_COMPLETION_CONTEXT" fzf-search-display; then
@@ -81,10 +88,22 @@ fzf_completion() {
                     _fzf_completion_preexit() {
                         trap -
                         functions + | "$_fzf_bash_completion_grep"  -F -vx -e "$(functions -u +)" -e "$full_functions" | while read -r f; do which -- "$f"; done >&"${__evaled}"
-                        { typeset -p -- $(typeset + | "$_fzf_bash_completion_grep"  -vF 'local ' | "$_fzf_bash_completion_awk" '{print $NF}') | "$_fzf_bash_completion_grep" -xvFf <(printf %s "$full_variables") >&"${__evaled}" } 2>/dev/null
+                        # skip local and autoload vars
+                        { typeset -p -- $(typeset + | "$_fzf_bash_completion_grep" -vF -e 'local ' -e 'undefined ' | "$_fzf_bash_completion_awk" '{print $NF}' | "$_fzf_bash_completion_grep" -vFx "$autoload_variables") | "$_fzf_bash_completion_grep" -xvFf <(printf %s "$full_variables") >&"${__evaled}" } 2>/dev/null
                     }
                     trap _fzf_completion_preexit EXIT TERM
-                    _main_complete 2>&1
+
+                    # Attempt shell expansion on the current word.  If that fails, attempt completion.
+                    if [[ -z "${words[CURRENT]}" ]] || (
+                        # produce only one big expansion (instead of individual entries)
+                        zstyle ':completion:*' tag-order all-expansions
+                        # manually invoke _expand here
+                        _expand 2>&2
+                        (( compstate[nmatches] == 0 ))
+                    ); then
+                        _main_complete 2>&1
+                    fi
+
                 )"
                 printf "stderr='%s'\\n" "${stderr//'/'\''}" >&"${__evaled}"
                 # if a process forks and it holds onto the stdout handles, we may end up blocking waiting for it to close it
@@ -192,6 +211,7 @@ _fzf_completion_compadd() {
     local __filenames="${__flags[(r)-f]}"
     local __noquote="${__flags[(r)-Q]}"
     local __is_param="${__flags[(r)-e]}"
+    local __no_matching="${__flags[(r)-U]}"
 
     if [ -n "${__optskv[(i)-A]}${__optskv[(i)-O]}${__optskv[(i)-D]}" ]; then
         # handle -O -A -D
@@ -206,8 +226,8 @@ _fzf_completion_compadd() {
     fi
 
     builtin compadd -Q -A __hits -D __disp "${__flags[@]}" "${__opts[@]}" "${__ipre[@]}" "${__apre[@]}" "${__hpre[@]}" "${__hsuf[@]}" "${__asuf[@]}" "${__isuf[@]}" "$@"
-    # urgh have to run it for real as some completion functions check compstate[nmatches]
-    builtin compadd -a __hits
+    # have to run it for real as some completion functions check compstate[nmatches]
+    builtin compadd $__no_matching -a __hits
     local code="$?"
     __flags="${(j..)__flags//[ak-]}"
     if [ -z "${__optskv[(i)-U]}" ]; then
